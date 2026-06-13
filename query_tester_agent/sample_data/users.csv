@@ -1,0 +1,12 @@
+user_id,email,country_code,is_active,created_at
+1,alice@example.com,US,true,2023-01-15
+2,bob@example.com,GB,true,2023-02-20
+3,,FR,true,2023-03-10
+4,diana@example.com,DE,true,2023-04-05
+5,eve@example.com,CA,true,2023-05-12
+5,eve@example.com,CA,true,2023-05-12
+6,frank@example.com,AU,true,2023-06-18
+7,grace@example.com,JP,true,2023-07-22
+8,henry@example.com,BR,false,2023-08-30
+9,iris@example.com,IT,true,2023-09-14
+10,jack@example.com,MX,true,2023-10-01
