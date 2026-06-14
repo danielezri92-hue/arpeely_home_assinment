@@ -26,6 +26,4 @@ from prev_day
 WHERE calendar_day > DATE_SUB((select max(calendar_day) from pop), interval 3 day)
 
 -- Production considerations (not implemented to keep scope focused):
--- Q1: Add ORDER BY number for deterministic output
--- Q2: Limit to recent date range
 -- All queries: use params and not dates hardcoded

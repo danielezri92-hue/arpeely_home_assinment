@@ -1,0 +1,292 @@
+[USER]
+I'm building a CLI tool in python that helps data engineers automatically generate and run data quality tests. how is it going to work: i write a sql query (a select with CTEs or a create table statement) and the tool analyzes it and suggests data quality tests on the result - tests like null checks, uniqueness on id columns, duplicate rows, valid email format if theres an email column , business logic test (column x should always be greater then column y) etc. then it actually runs the tests and prints a pass/fail report. i don't want it to just run tests blindly - it should suggest the tests first with a reason for each one, let the user approve/edit, and only then run.
+
+the flow:
+1. i run: python main.py --sql my_query.sql
+2. the tool understands the query - what columns come out of it, if there
+   are joins etc.
+3. it suggests tests, each one with a reason ("column named user_id - probably should be unique","country_code" - from a specific list, active_users_count - cant be null and probably should be int and not str etc.)
+4. after it suggests the tests - i want to approve or remove some of them interactively in the terminal before it runs (something simple like typing skip 3, or a checkbox menu if theres an easy library for that). 
+
+constraints: this has to run fully local, no warehouse connection and no api keys. so i need some way to simulate the prod tables locally (i can include sample data files in the repo) and actually execute my query and the tests on them.
+what libraries would you use for the sql parsing part and for running sql locally? explain the options shortly and lets pick, then set up the project structure.
+---
+[ASSISTANT]
+Good project. Two key decisions to make before touching code:
+
+---
+
+## SQL Parsing
+
+| Library | What it does | Verdict |
+|---|---|---|
+| **`sqlglot`** | Full AST parser, understands CTEs, joins, column aliases, multiple dialects (BigQuery, Snowflake, etc.) | Best choice |
+| `sqlparse` | Tokenizer/formatter only — no real AST, can't reliably extract column semantics | Too weak |
+| `antlr4` + grammar | Full parser generator, very powerful | Way too heavy |
+
+**Pick `sqlglot`.** It gives you a proper AST so you can walk the tree and know which columns are selected, which come from joins, whether a CTE is referenced, etc. It also transpiles between dialects — useful if you're writing BigQuery SQL but running locally on DuckDB.
+
+---
+
+## Local SQL Execution
+
+| Library | What it does | Verdict |
+|---|---|---|
+| **`duckdb`** | In-process OLAP engine, reads CSV/Parquet directly, excellent SQL coverage, fast | Best choice |
+| `sqlite3` | stdlib, simple, but weak dialect support — missing window functions, array types, etc. | Too limited |
+| `pandas` | You'd have to translate SQL → DataFrame ops | Not what you want |
+
+**Pick `duckdb`.** It runs your actual SQL as-is (with minor dialect adjustments via sqlglot if needed), reads your sample CSVs natively with `read_csv_auto()`, and handles CTEs, window functions, and complex joins. You register your sample data files as tables and your query just runs.
+
+---
+
+## Interactive Approval
+
+**`questionary`** — gives you a checkbox list out of the box (`questionary.checkbox(...)`). One import, looks great in the terminal. No need to build a custom "skip 3" parser unless you want to.
+
+---
+
+## Proposed project structure
+
+```
+query_tester_agent/
+├── main.py                    # CLI entrypoint (argparse)
+├── requirements.txt
+├── sample_data/               # CSV files standing in for prod tables
+│   ├── users.csv
+│   └── orders.csv
+├── example_queries/
+│   └── sample.sql
+└── src/
+    ├── __init__.py
+    ├── parser.py              # sqlglot: extract columns, joins, CTEs
+    ├── suggester.py           # column name/type heuristics → test list
+    ├── runner.py              # duckdb: execute query + run each test
+    ├── interactive.py         # questionary: show tests, get approval
+    └── reporter.py            # print pass/fail table (rich)
+```
+
+I'd add `rich` for the final report table — it's a natural pair with `questionary` and makes the output readable.
+
+---
+
+**Confirmed picks: `sqlglot` + `duckdb` + `questionary` + `rich`.** Want me to set up the project structure with a working skeleton — sample data, the parse/suggest/approve/run pipeline stubbed out, and a real example query you can run end-to-end?
+---
+[USER]
+yes, the structure looks good.
+1.  lets implement it in small steps - create the strutcure and implement the parser only (parse a sql file, print the output columns), create an example query to verify before we move on to the suggester.
+2. for the example query - make it realistic, something with a CTE and a join between users and orders, so we can actually test the join.
+---
+[ASSISTANT]
+Let me check what's already in the directory before creating anything.
+---
+[ASSISTANT]
+Empty directory. Creating everything from scratch.
+---
+[ASSISTANT]
+Now install dependencies and run it:
+---
+[ASSISTANT]
+Working perfectly. Here's what we have:
+
+- All 9 output columns correctly identified, including the computed `order_tenure_days`
+- CTEs (`active_users`, `user_order_stats`) detected
+- Join detected
+- `COALESCE(...)` expressions correctly named by their alias, source alias showing `—` since it's a function call wrapping two tables
+- `email`, `country_code`, `user_id` — exactly the columns the suggester will need to reason about
+
+The structure on disk:
+```
+query_tester_agent/
+├── main.py
+├── requirements.txt
+├── .venv/
+├── src/
+│   ├── __init__.py
+│   └── parser.py
+└── example_queries/
+    └── user_order_summary.sql
+```
+
+Ready to move to the suggester when you are. It'll take the `ParsedQuery` output and apply heuristics per column name — `user_id` → uniqueness, `email` → format regex, `country_code` → value set, `total_orders` → non-negative int, `order_tenure_days` → `>=0` (last minus first can't be negative), etc.
+---
+[USER]
+i ran it myself, works great. lets move to the suggester. few requirements:
+1. every suggestion should have a reason explaining why it was
+suggested (column name matches _id). the user should see it in the approval step and also
+save them as comments in the final sql file (to understand the test).
+2. each test should be generated as a sql query that returns the count of bad rows, so 0 = pass. keep the sql since the idea is the user can later use these tests on a real warehouse.
+3. add one table-level suggestion (not only per-column) such as: duplicate full
+rows check, and row count > 0.
+---
+[ASSISTANT]
+I'll update `parser.py` to carry the source SQL, implement `suggester.py`, and update `main.py` to print the suggestions table.
+---
+[ASSISTANT]
+Now update `main.py` to show the suggestions table:
+---
+[ASSISTANT]
+14 tests, all correct. A few things worth noting about what the heuristics caught cleanly:
+
+- `total_orders` and `total_spent` — skipped NOT NULL because the `raw_expr` starts with `COALESCE`, but still got the non-negative range check
+- `last_order_date` / `first_order_date` — suggested NOT NULL (debatable given the LEFT JOIN, but the user will see and can skip them in the approval step)
+- `order_tenure_days` — correctly got the non-negative range check (computed difference can't go backwards)
+- Table-level duplicate check uses explicit column names rather than `GROUP BY ALL` so it's portable across warehouses
+
+Next step is the interactive approval (`interactive.py`) — checkbox menu where you can skip tests before they run. Want to go straight there?
+---
+[USER]
+looks good, also the catch on the coalesce .
+but the not_null on last_order_date and first_order_date is a problem - they come from the left-join side, so users with no orders will have legit nulls and the test will fail (on valid data). 
+if the parser already detects the left join - so lets use it: keep suggesting not_null on these columns, but add a warning to the reason (like "comes from the null side of a LEFT JOIN - nulls may be expected here".)
+i prefer warning over skipping completely because maybe the business logic does require no nulls there - thats why i need human in the loop to decide. 
+
+after that works, lets move to the interactive approval.
+---
+[ASSISTANT]
+The fix lives in two places: the parser needs to extract which table aliases are on the right side of LEFT JOINs, then the suggester checks if a column's source alias is in that set before writing the reason.
+---
+[ASSISTANT]
+Now update the suggester to thread `parsed` into `_column_tests` and annotate the reason:
+---
+[ASSISTANT]
+Exactly right — rows 12 and 13 get the warning, everything from the left side (`u.*`) is clean. The warning carries through to wherever the reason is displayed, so it'll also appear in the approval step and saved as the SQL comment automatically.
+
+Now for `interactive.py`. Here's what I'll build: a `questionary.checkbox` showing all suggestions pre-checked, the user deselects any they want to skip, and the approved list is returned. Ready to implement?
+---
+[USER]
+yes. req:
+1. each checkbox item should show the column, the test type, and the reason
+   (including warnings).
+2. if the user deselects everything - exit with a msg.
+3.if the terminal doesn't support the interactive menu for some reason - so approve all with a notice.
+4. after the selection, print a short summary: line like "running 11 of 14 tests (3 skipped)" before moving on.
+---
+[ASSISTANT]
+Now wire it into `main.py` after the suggestions table:
+---
+[ASSISTANT]
+Let me verify it runs cleanly end-to-end (non-interactive path, since we're in a terminal without a tty here):
+---
+[ASSISTANT]
+Good — non-interactive fallback fires correctly. When you run it in a real terminal you'll see the questionary checkbox. Each item looks like:
+
+```
+[ ] [ 3]  user_id               not_null      'user_id' is a key/date field and should never be NULL
+[ ] [12]  last_order_date       not_null      'last_order_date' is a key/date field ... — comes from the nullable side of a LEFT JOIN, NULLs may be expected here
+```
+
+All 14 pre-checked, deselect any with space, enter to confirm. The summary line prints before handing off to the runner.
+
+Next is the runner: DuckDB executes the query with sample CSVs registered as tables, runs each approved test SQL, collects `failing_rows`, and passes results to the reporter. Want to go there?
+---
+[USER]
+the menu works. i unchecked the 13th test and got good feedback (Running 13 of 14 tests  (1 skipped)). i noticed in the reasons: email and country_code get: "is a key/date field and should never be NULL" - thats not accurate, email is not a key or a date. looks like all not_null tests share one generic
+reason string.. each reason needs to be the actual rule that triggered it ("email fields are usually required", "country_code is a categorical field that shouldnt be missing" etc). 
+after that - do the next step
+---
+[ASSISTANT]
+The fix is to replace the single generic reason with a lookup that returns a pattern-specific string. I'll refactor `_looks_not_nullable` into `_not_null_reason` that returns the exact reason for whichever pattern matched, or `None` if none did.
+---
+[ASSISTANT]
+Each not_null test now has a distinct reason tailored to what triggered it. Now on to the runner — `duckdb` executes the approved test SQLs against sample data and collects pass/fail results. I'll also need the sample CSVs for `users` and `orders`. Ready to implement?
+---
+[USER]
+yes. 
+for the sample - make sure it's something realistic and add there a failures (null emails, duplicated fully row ).
+---
+[ASSISTANT]
+Three things to implement in parallel: sample CSVs, runner, reporter — then wire into `main.py`.
+---
+[ASSISTANT]
+Intentional failures baked in:
+- User 3 → NULL email
+- User 5 → full duplicate row (same user_id, email, country_code, created_at)
+- User 4 → no orders → NULL last/first_order_date from the LEFT JOIN
+- User 8 → inactive, filtered by the CTE (clean, won't appear)
+---
+[ASSISTANT]
+Now wire everything into `main.py`:
+---
+[ASSISTANT]
+All 5 planted failures caught, no false positives. The results match exactly what the data has:
+
+| Test | Why it failed |
+|---|---|
+| `table__no_duplicate_rows` | user 5 appears twice in `users.csv` |
+| `user_id__unique` | same — duplicate user propagates through the CTE |
+| `email__not_null` | user 3 has an empty email field |
+| `last_order_date__not_null` | user 4 has no orders → NULL from LEFT JOIN |
+| `first_order_date__not_null` | same |
+
+`email__format` correctly passes because the condition is `email IS NOT NULL AND email NOT LIKE ...` — user 3's NULL is excluded, the remaining emails are all valid.
+
+What's next — saving the approved test SQLs to a file with the reasons as comments?
+---
+[USER]
+great! yes cont
+---
+[ASSISTANT]
+The file looks exactly right. A few things worth noting:
+
+- Reason text wraps cleanly at ~72 chars, including multi-line warnings (see tests 12–13 where the LEFT JOIN warning stays readable)
+- Each block has `-- last run: PASS` / `-- last run: FAIL — 1 failing row(s)` so when someone opens this file weeks later they know the last known state
+- The SQL is copy-paste runnable on any warehouse that supports CTEs — swap `read_csv_auto(...)` with your actual table name and it works as-is
+- The file defaults to `<query_name>_tests.sql` next to the source file, overridable with `--output`
+
+The full pipeline is now complete:
+
+```
+--sql my_query.sql
+  └── parse        → columns, CTEs, LEFT JOIN sides
+  └── suggest      → 14 heuristic tests with specific reasons
+  └── approve      → interactive checkbox, summary line
+  └── run          → DuckDB against sample CSVs
+  └── report       → pass/fail table + summary
+  └── export       → _tests.sql with comments + last-run status
+```
+
+What's next — anything to improve, or a new feature?
+---
+[USER]
+one problem with the export - you said the sql needs read_csv_auto swapped manually. that breaks the requirement, the whole point was that i can take this file to a real warehouse as-is. the tests should reference a clean table (view?) name, not the duckdb csv function. (maybe think of a simple solution like a view? so there's one place to adapt, not on every test)
+
+after that fixed, lets do another check and a readme file:
+1. another example - a different query (maybe a create table statement
+   with a group by, no join) + the csv it needs.
+2. the README - what was the problem, install + how to run, BOTH examples
+   with their expected outputs, and a short explanation of how the
+   suggestion heuristics.
+---
+[ASSISTANT]
+Three things to do: fix the exporter preamble, add the second example, write the README. Let me do the files in parallel then run both examples to get real output for the README.
+---
+[ASSISTANT]
+Pass `data_dir` into `save_tests`:
+---
+[ASSISTANT]
+Now run both examples to capture the real output for the README:
+---
+[ASSISTANT]
+The runner errors on `CREATE TABLE` because `_wrap` embeds the full statement inside a CTE, but DuckDB doesn't allow `CREATE TABLE` inside a CTE. The fix: the parser should store the extractable SELECT separately for test generation.
+---
+[ASSISTANT]
+Both examples clean. Now let me also verify the preamble in the exported file looks right:
+---
+[ASSISTANT]
+Now the README with real output:
+---
+[ASSISTANT]
+Let me do a final check — verify example 1's exported file now has the preamble too:
+---
+[ASSISTANT]
+Everything is working. Here's a summary of what was done:
+
+**Export fix:** The preamble is now a single `CREATE OR REPLACE VIEW` block at the top of the file — one place to adapt for a real warehouse. Delete the block, done. The 14 test queries themselves reference `users`, `orders`, `sessions` as plain table names with no DuckDB-specific syntax.
+
+**Parser fix:** `CREATE TABLE ... AS SELECT` now extracts just the SELECT for embedding in test CTEs. DuckDB (and every warehouse) rejects `CREATE TABLE` inside a CTE — the tool now handles this transparently.
+
+**Second example (`session_stats.sql`):** GROUP BY with no join, surfaces two real failures: the NULL `country_code` group and CA's `total_duration_seconds` going negative from a bad `-500s` session.
+
+**README:** covers the problem, install, both examples with real output, the exported SQL format, and a full heuristics table.
+---

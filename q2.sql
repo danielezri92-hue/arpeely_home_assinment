@@ -1,6 +1,6 @@
 -- * No time constraint specified - so the query runs on full table (better to provide date range).
 -- * The curren day reflects partial data
--- I used row_number instead of rank() or dense_rank() - since they would act diff on ties (1,1,3 or 1,1,2 where row_number just do 1,2,3) 
+-- * I used row_number instead of rank() or dense_rank() - since they would act diff on ties (1,1,3 or 1,1,2 where row_number just do 1,2,3) 
 
 
 with pop as (
@@ -10,3 +10,7 @@ FROM `bigquery-public-data.crypto_ethereum.blocks` as base
 select *
 from pop
 where rn <=3
+
+-- Production considerations (not implemented to keep scope focused):
+-- Q2: Limit to recent date range
+-- All queries: use params and not dates hardcoded

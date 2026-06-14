@@ -3,3 +3,7 @@ FROM `bigquery-public-data.crypto_ethereum.blocks` as base cross join unnest (wi
 where timestamp >= TIMESTAMP_SUB(current_timestamp(), INTERVAL 7 DAY) -- 7*24h back from query execution time (timestamp meaning)
 group by 1
 having count(*)>=5
+
+-- Production considerations (not implemented to keep scope focused):
+-- Q1: Add ORDER BY number for deterministic output
+-- All queries: use params and not dates hardcoded
